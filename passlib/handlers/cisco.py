@@ -12,7 +12,7 @@ from warnings import warn
 #site
 #libs
 #pkg
-from passlib.utils import h64, to_bytes
+from passlib.utils import h64, right_pad_string, to_unicode
 from passlib.utils.compat import b, bascii_to_str, bytes, unicode, u, join_byte_values, \
              join_byte_elems, byte_elem_value, iter_byte_values, uascii_to_str, str_to_uascii
 import passlib.utils.handlers as uh
@@ -72,7 +72,7 @@ class cisco_pix(uh.HasUserContext, uh.StaticHandler):
             secret += user[:4]
 
         # pad/truncate to 16
-        secret = secret[:16] + b("\x00") * (16 - len(secret))
+        secret = right_pad_string(secret, 16)
 
         # md5 digest
         hash = md5(secret).digest()
@@ -126,15 +126,18 @@ class cisco_type7(uh.GenericHandler):
         return None
 
     @classmethod
+    def genhash(cls, secret, config):
+        # special case to handle ``config=None`` in same style as StaticHandler
+        if config is None:
+            return cls.encrypt(secret)
+        else:
+            return super(cisco_type7, cls).genhash(secret, config)
+
+    @classmethod
     def from_string(cls, hash):
-        if not hash:
-            if hash is None:
-                return cls(use_defaults=True)
-            raise ValueError("no hash provided")
+        hash = to_unicode(hash, "ascii", "hash")
         if len(hash) < 2:
-            raise ValueError("invalid cisco_type7 hash")
-        if isinstance(hash, bytes):
-            hash = hash.decode("latin-1")
+            raise uh.exc.InvalidHashError(cls)
         salt = int(hash[:2]) # may throw ValueError
         return cls(salt=salt, checksum=hash[2:].upper())
 
@@ -152,7 +155,7 @@ class cisco_type7(uh.GenericHandler):
             else:
                 raise TypeError("no salt specified")
         if not isinstance(salt, int):
-            raise TypeError("salt must be an integer")
+            raise uh.exc.ExpectedTypeError(salt, "integer", "salt")
         if salt < 0 or salt > self.max_salt_value:
             msg = "salt/offset must be in 0..52 range"
             if self.relaxed:
@@ -171,7 +174,8 @@ class cisco_type7(uh.GenericHandler):
     def _calc_checksum(self, secret):
         # XXX: no idea what unicode policy is, but all examples are
         # 7-bit ascii compatible, so using UTF-8
-        secret = to_bytes(secret, "utf-8", errname="secret")
+        if isinstance(secret, unicode):
+            secret = secret.encode("utf-8")
         return hexlify(self._cipher(secret, self.salt)).decode("ascii").upper()
 
     @classmethod

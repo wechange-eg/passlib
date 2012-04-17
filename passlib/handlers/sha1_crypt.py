@@ -81,20 +81,12 @@ class sha1_crypt(uh.HasManyBackends, uh.HasRounds, uh.HasSalt, uh.GenericHandler
 
     @classmethod
     def from_string(cls, hash):
-        rounds, salt, chk = uh.parse_mc3(hash, cls.ident, cls.name)
-        if rounds.startswith("0"):
-            raise ValueError("invalid sha1-crypt hash (zero-padded rounds)")
-        return cls(
-            rounds=int(rounds),
-            salt=salt,
-            checksum=chk,
-        )
+        rounds, salt, chk = uh.parse_mc3(hash, cls.ident, handler=cls)
+        return cls(rounds=rounds, salt=salt, checksum=chk)
 
-    def to_string(self):
-        hash = u("$sha1$%d$%s") % (self.rounds, self.salt)
-        if self.checksum:
-            hash += u("$") + self.checksum
-        return uascii_to_str(hash)
+    def to_string(self, config=False):
+        chk = None if config else self.checksum
+        return uh.render_mc3(self.ident, self.rounds, self.salt, chk)
 
     #=========================================================
     #backend
@@ -105,7 +97,7 @@ class sha1_crypt(uh.HasManyBackends, uh.HasRounds, uh.HasSalt, uh.GenericHandler
 
     @classproperty
     def _has_backend_os_crypt(cls):
-        return test_crypt("test", '$sha1$1$Wq3GL2Vp$C8U''25GvfHS8qGHim'
+        return test_crypt("test", '$sha1$1$Wq3GL2Vp$C8U25GvfHS8qGHim'
                                           'ExLaiSFlGkAe')
 
     def _calc_checksum_builtin(self, secret):
@@ -132,9 +124,11 @@ class sha1_crypt(uh.HasManyBackends, uh.HasRounds, uh.HasSalt, uh.GenericHandler
     ]
 
     def _calc_checksum_os_crypt(self, secret):
-        hash = safe_crypt(secret, self.to_string())
+        config = self.to_string(config=True)
+        hash = safe_crypt(secret, config)
         if hash:
-            return hash[hash.rindex("$")+1:]
+            assert hash.startswith(config) and len(hash) == len(config) + 29
+            return hash[-28:]
         else:
             return self._calc_checksum_builtin(secret)
 

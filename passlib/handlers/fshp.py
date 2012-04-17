@@ -11,6 +11,7 @@ import logging; log = logging.getLogger(__name__)
 from warnings import warn
 #site
 #libs
+from passlib.utils import to_unicode
 import passlib.utils.handlers as uh
 from passlib.utils.compat import b, bytes, bascii_to_str, iteritems, u,\
                                  unicode
@@ -116,7 +117,7 @@ class fshp(uh.HasRounds, uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
         if not isinstance(variant, int):
             raise TypeError("fshp variant must be int or known alias")
         if variant not in self._variant_info:
-            raise TypeError("unknown fshp variant")
+            raise ValueError("invalid fshp variant")
         return variant
 
     @property
@@ -142,21 +143,18 @@ class fshp(uh.HasRounds, uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
 
     @classmethod
     def from_string(cls, hash):
-        if not hash:
-            raise ValueError("no hash specified")
-        if isinstance(hash, bytes):
-            hash = hash.decode("ascii")
+        hash = to_unicode(hash, "ascii", "hash")
         m = cls._hash_regex.match(hash)
         if not m:
-            raise ValueError("not a valid FSHP hash")
+            raise uh.exc.InvalidHashError(cls)
         variant, salt_size, rounds, data = m.group(1,2,3,4)
         variant = int(variant)
         salt_size = int(salt_size)
         rounds = int(rounds)
         try:
             data = b64decode(data.encode("ascii"))
-        except ValueError:
-            raise ValueError("malformed FSHP hash")
+        except TypeError:
+            raise uh.exc.MalformedHashError(cls)
         salt = data[:salt_size]
         chk = data[salt_size:]
         return cls(salt=salt, checksum=chk, rounds=rounds, variant=variant)

@@ -39,9 +39,10 @@ if ut_version < 2:
 from passlib.exc import MissingBackendError
 import passlib.registry as registry
 from passlib.utils import has_rounds_info, has_salt_info, rounds_cost_values, \
-                          classproperty, rng, getrandstr, is_ascii_safe, to_native_str
+                          classproperty, rng, getrandstr, is_ascii_safe, to_native_str, \
+                          repeat_string
 from passlib.utils.compat import b, bytes, iteritems, irange, callable, \
-                                 sb_types, exc_err, u, unicode
+                                 base_string_types, exc_err, u, unicode, PY2
 import passlib.utils.handlers as uh
 #local
 __all__ = [
@@ -133,6 +134,18 @@ def get_file(path):
     with open(path, "rb") as fh:
         return fh.read()
 
+def tonn(source):
+    "convert native string to non-native string"
+    if not isinstance(source, str):
+        return source
+    elif PY3:
+        return source.encode("utf-8")
+    else:
+        try:
+            return source.decode("utf-8")
+        except UnicodeDecodeError:
+            return source.decode("latin-1")
+
 #=========================================================
 #custom test base
 #=========================================================
@@ -196,7 +209,7 @@ class TestCase(unittest.TestCase):
     resetWarningState = True
 
     def setUp(self):
-        unittest.TestCase.setUp(self)
+        super(TestCase, self).setUp()
         if self.resetWarningState:
             ctx = reset_warnings()
             ctx.__enter__()
@@ -373,7 +386,7 @@ class TestCase(unittest.TestCase):
             # 3.0 and <= 2.6 didn't have this method at all
             def assertRegex(self, text, expected_regex, msg=None):
                 """Fail the test unless the text matches the regular expression."""
-                if isinstance(expected_regex, sb_types):
+                if isinstance(expected_regex, base_string_types):
                     assert expected_regex, "expected_regex must not be empty."
                     expected_regex = re.compile(expected_regex)
                 if not expected_regex.search(text):
@@ -661,6 +674,10 @@ class HandlerCase(TestCase):
                 msg = "verify failed: secret=%r, hash=%r" % (secret, hash)
             raise self.failureException(msg)
 
+    def check_returned_native_str(self, result, func_name):
+        self.assertIsInstance(result, str,
+            "%s() failed to return native string: %r" % (func_name, result,))
+
     #=========================================================
     # internal class attrs
     #=========================================================
@@ -690,7 +707,7 @@ class HandlerCase(TestCase):
     # setup / cleanup
     #=========================================================
     def setUp(self):
-        TestCase.setUp(self)
+        super(HandlerCase, self).setUp()
 
         # if needed, select specific backend for duration of test
         handler = self.handler
@@ -698,30 +715,8 @@ class HandlerCase(TestCase):
         if backend:
             if not hasattr(handler, "set_backend"):
                 raise RuntimeError("handler doesn't support multiple backends")
-            if backend == "os_crypt" and not handler.has_backend("os_crypt"):
-                self._patch_safe_crypt()
             self.addCleanup(handler.set_backend, handler.get_backend())
             handler.set_backend(backend)
-
-    def _patch_safe_crypt(self):
-        """if crypt() doesn't support current hash alg, this patches
-        safe_crypt() so that it transparently uses another one of the handler's
-        backends, so that we can go ahead and test as much of code path
-        as possible.
-        """
-        handler = self.handler
-        alt_backend = _find_alternate_backend(handler, "os_crypt")
-        if not alt_backend:
-            raise AssertionError("handler has no available backends!")
-        import passlib.utils as mod
-        def crypt_stub(secret, hash):
-            with temporary_backend(handler, alt_backend):
-                hash = handler.genhash(secret, hash)
-            assert isinstance(hash, str)
-            return hash
-        self.addCleanup(setattr, mod, "_crypt", mod._crypt)
-        mod._crypt = crypt_stub
-        self.using_patched_crypt = True
 
     #=========================================================
     # basic tests
@@ -732,6 +727,9 @@ class HandlerCase(TestCase):
         def ga(name):
             return getattr(handler, name, None)
 
+        #
+        # name should be a str, and valid
+        #
         name = ga("name")
         self.assertTrue(name, "name not defined:")
         self.assertIsInstance(name, str, "name must be native str")
@@ -739,75 +737,146 @@ class HandlerCase(TestCase):
         self.assertTrue(re.match("^[a-z0-9_]+$", name),
                         "name must be alphanum + underscore: %r" % (name,))
 
+        #
+        # setting_kwds should be specified
+        #
         settings = ga("setting_kwds")
         self.assertTrue(settings is not None, "setting_kwds must be defined:")
         self.assertIsInstance(settings, tuple, "setting_kwds must be a tuple:")
 
+        #
+        # context_kwds should be specified
+        #
         context = ga("context_kwds")
         self.assertTrue(context is not None, "context_kwds must be defined:")
         self.assertIsInstance(context, tuple, "context_kwds must be a tuple:")
 
-    def test_02_genconfig(self):
-        "test basic genconfig() behavior"
-        # this also tests identify/verify/genhash have basic functionality.
+        # XXX: any more checks needed?
 
+    def test_02_config_workflow(self):
+        """test basic config-string workflow
+
+        this tests that genconfig() returns the expected types,
+        and that identify() and genhash() handle the result correctly.
+        """
+        #
+        # genconfig() should return native string,
+        # or ``None`` if handler does not use a configuration string
+        # (mostly used by static hashes)
+        #
+        config = self.do_genconfig()
         if self.supports_config_string:
-            # try to generate a config string, make sure it's right type
-            config = self.do_genconfig()
-            self.assertIsInstance(config, str,
-                "genconfig() failed to return native string: %r" % (config,))
+            self.check_returned_native_str(config, "genconfig")
+        else:
+            self.assertIs(config, None)
 
-            # config should be positively identified by handler
-            self.assertTrue(self.do_identify(config),
-                "identify() failed to identify genconfig() output: %r" %
-                (config,))
+        #
+        # genhash() should always accept genconfig()'s output,
+        # whether str OR None.
+        #
+        result = self.do_genhash('stub', config)
+        self.check_returned_native_str(result, "genhash")
 
-            # verify() should throw error for config strings.
+        #
+        # verify() should never accept config strings
+        #
+        if self.supports_config_string:
             self.assertRaises(ValueError, self.do_verify, 'stub', config,
                 __msg__="verify() failed to reject genconfig() output: %r" %
                 (config,))
-
-            # genhash should accept genconfig output
-            result = self.do_genhash('stub', config)
-            self.assertIsInstance(result, str,
-                "genhash() failed to return native string: %r" % (result,))
-
         else:
-            self.assertIs(self.do_genconfig(), None)
-            # identify/verify/genhash are tested against 'None'
-            # in test_76_null()
+            self.assertRaises(TypeError, self.do_verify, 'stub', config)
 
-    def test_03_encrypt(self):
-        "test basic encrypt() behavior"
-        # this also tests identify/verify/genhash have basic functionality.
+        #
+        # identify() should positively identify config strings if not None.
+        #
+        if self.supports_config_string:
+            self.assertTrue(self.do_identify(config),
+                "identify() failed to identify genconfig() output: %r" %
+                (config,))
+        else:
+            self.assertRaises(TypeError, self.do_identify, config)
 
-        # test against stock passwords
+    def test_03_hash_workflow(self):
+        """test basic hash-string workflow.
+
+        this tests that encrypt()'s hashes are accepted
+        by verify() and identify(), and regenerated correctly by genhash().
+        the test is run against a couple of different stock passwords.
+        """
+        wrong_secret = 'stub'
         for secret in self.stock_passwords:
 
-            # encrypt should generate hash...
+            #
+            # encrypt() should generate native str hash
+            #
             result = self.do_encrypt(secret)
-            self.assertIsInstance(result, str,
-                                  "encrypt must return native str:")
+            self.check_returned_native_str(result, "encrypt")
 
-            # which should be positively identifiable...
-            self.assertTrue(self.do_identify(result))
-
-            # and should verify correctly...
+            #
+            # verify() should work only against secret
+            #
             self.check_verify(secret, result)
+            self.check_verify(wrong_secret, result, negate=True)
 
-            # and should NOT verify correctly
-            assert secret != 'stub'
-            self.check_verify('stub', result, negate=True)
-
-            # and genhash should reproduce original
+            #
+            # genhash() should reproduce original hash
+            #
             other = self.do_genhash(secret, result)
-            self.assertIsInstance(other, str,
-                                  "genhash must return native str:")
+            self.check_returned_native_str(other, "genhash")
             self.assertEqual(other, result, "genhash() failed to reproduce "
                              "hash: secret=%r hash=%r: result=%r" %
-                             (secret, hash, result))
+                             (secret, result, other))
 
-    def test_04_backends(self):
+            #
+            # genhash() should NOT reproduce original hash for wrong password
+            #
+            other = self.do_genhash(wrong_secret, result)
+            self.check_returned_native_str(other, "genhash")
+            if self.is_disabled_handler:
+                self.assertEqual(other, result, "genhash() failed to reproduce "
+                                 "disabled-hash: secret=%r hash=%r other_secret=%r: result=%r" %
+                                 (secret, result, wrong_secret, other))
+            else:
+                self.assertNotEqual(other, result, "genhash() duplicated "
+                                 "hash: secret=%r hash=%r wrong_secret=%r: result=%r" %
+                                 (secret, result, wrong_secret, other))
+
+            #
+            # identify() should positively identify hash
+            #
+            self.assertTrue(self.do_identify(result))
+
+    def test_04_hash_types(self):
+        "test hashes can be unicode or bytes"
+        # this runs through workflow similar to 03, but wraps
+        # everything using tonn() so we test unicode under py2,
+        # and bytes under py3.
+
+        # encrypt using non-native secret
+        result = self.do_encrypt(tonn('stub'))
+        self.check_returned_native_str(result, "encrypt")
+
+        # verify using non-native hash
+        self.check_verify('stub', tonn(result))
+
+        # verify using non-native hash AND secret
+        self.check_verify(tonn('stub'), tonn(result))
+
+        # genhash using non-native hash
+        other = self.do_genhash('stub', tonn(result))
+        self.check_returned_native_str(other, "genhash")
+        self.assertEqual(other, result)
+
+        # genhash using non-native hash AND secret
+        other = self.do_genhash(tonn('stub'), tonn(result))
+        self.check_returned_native_str(other, "genhash")
+        self.assertEqual(other, result)
+
+        # identify using non-native hash
+        self.assertTrue(self.do_identify(tonn(result)))
+
+    def test_05_backends(self):
         "test multi-backend support"
         handler = self.handler
         if not hasattr(handler, "set_backend"):
@@ -815,12 +884,16 @@ class HandlerCase(TestCase):
         with temporary_backend(handler):
             for backend in handler.backends:
 
+                #
                 # validate backend name
+                #
                 self.assertIsInstance(backend, str)
                 self.assertNotIn(backend, RESERVED_BACKEND_NAMES,
                                  "invalid backend name: %r" % (backend,))
 
+                #
                 # ensure has_backend() returns bool value
+                #
                 ret = handler.has_backend(backend)
                 if ret is True:
                     # verify backend can be loaded
@@ -1032,6 +1105,34 @@ class HandlerCase(TestCase):
                 self.assertRaises(ValueError, self.do_genconfig, salt=c*chunk,
                                   __msg__="invalid salt char %r:" % (c,))
 
+    @property
+    def salt_type(self):
+        "hack to determine salt keyword's datatype"
+        # NOTE: cisco_type7 uses 'int'
+        if getattr(self.handler, "_salt_is_bytes", False):
+            return bytes
+        else:
+            return unicode
+
+    def test_15_salt_type(self):
+        "test non-string salt values"
+        self.require_salt()
+        salt_type = self.salt_type
+
+        # should always throw error for random class.
+        class fake(object):
+            pass
+        self.assertRaises(TypeError, self.do_encrypt, 'stub', salt=fake())
+
+        # unicode should be accepted only if salt_type is unicode.
+        if salt_type is not unicode:
+            self.assertRaises(TypeError, self.do_encrypt, 'stub', salt=u('x'))
+
+        # bytes should be accepted only if salt_type is bytes,
+        # OR if salt type is unicode and running PY2 - to allow native strings.
+        if not (salt_type is bytes or (PY2 and salt_type is unicode)):
+            self.assertRaises(TypeError, self.do_encrypt, 'stub', salt=b('x'))
+
     #==============================================================
     # rounds
     #==============================================================
@@ -1170,8 +1271,7 @@ class HandlerCase(TestCase):
             # hash only counts the first <sc> characters; eg: bcrypt, des-crypt
 
             # create & hash string that's exactly sc+1 chars
-            secret = (base * (1+sc//16))[:sc+1]
-            assert len(secret) == sc+1
+            secret = repeat_string(base, sc+1)
             hash = self.do_encrypt(secret)
 
             # check sc value isn't too large by verifying that sc-1'th char
@@ -1224,12 +1324,29 @@ class HandlerCase(TestCase):
             self.assertNotEqual(h2, h1,
                                 "genhash() should be case sensitive")
 
-    def test_62_secret_null(self):
-        "test password=None"
-        _, hash = self.get_sample_hash()
+    def test_62_secret_border(self):
+        "test non-string passwords are rejected"
+        hash = self.get_sample_hash()[1]
+
+        # secret=None
         self.assertRaises(TypeError, self.do_encrypt, None)
         self.assertRaises(TypeError, self.do_genhash, None, hash)
         self.assertRaises(TypeError, self.do_verify, None, hash)
+
+        # secret=int (picked as example of entirely wrong class)
+        self.assertRaises(TypeError, self.do_encrypt, 1)
+        self.assertRaises(TypeError, self.do_genhash, 1, hash)
+        self.assertRaises(TypeError, self.do_verify, 1, hash)
+
+    def test_63_large_secret(self):
+        "test MAX_PASSWORD_SIZE is enforced"
+        from passlib.exc import PasswordSizeError
+        from passlib.utils import MAX_PASSWORD_SIZE
+        secret = '.' * (1+MAX_PASSWORD_SIZE)
+        hash = self.get_sample_hash()[1]
+        self.assertRaises(PasswordSizeError, self.do_genhash, secret, hash)
+        self.assertRaises(PasswordSizeError, self.do_encrypt, secret)
+        self.assertRaises(PasswordSizeError, self.do_verify, secret, hash)
 
     #==============================================================
     # check identify(), verify(), genhash() against test vectors
@@ -1409,25 +1526,28 @@ class HandlerCase(TestCase):
                     __msg__= "genhash() failed to throw error for hash "
                     "belonging to %s: %r" % (name, hash))
 
-    def test_76_none(self):
-        "test empty hashes"
+    def test_76_hash_border(self):
+        "test non-string hashes are rejected"
         #
-        # test hash=None
+        # test hash=None is rejected (except if config=None)
         #
-        # FIXME: allowing value or type error to simplify implementation,
-        # but TypeError is really the correct one here.
-        self.assertFalse(self.do_identify(None))
-        self.assertRaises((ValueError, TypeError), self.do_verify, 'stub', None)
+        self.assertRaises(TypeError, self.do_identify, None)
+        self.assertRaises(TypeError, self.do_verify, 'stub', None)
         if self.supports_config_string:
-            self.assertRaises((ValueError, TypeError), self.do_genhash,
-                'stub', None)
+            self.assertRaises(TypeError, self.do_genhash, 'stub', None)
         else:
             result = self.do_genhash('stub', None)
-            self.assertIsInstance(result, str,
-                "genhash() failed to return native string: %r" % (result,))
+            self.check_returned_native_str(result, "genhash")
 
         #
-        # test hash=''
+        # test hash=int is rejected (picked as example of entirely wrong type)
+        #
+        self.assertRaises(TypeError, self.do_identify, 1)
+        self.assertRaises(TypeError, self.do_verify, 'stub', 1)
+        self.assertRaises(TypeError, self.do_genhash, 'stub', 1)
+
+        #
+        # test hash='' is rejected for all but the plaintext hashes
         #
         for hash in [u(''), b('')]:
             if self.accepts_all_hashes:
@@ -1435,15 +1555,21 @@ class HandlerCase(TestCase):
                 self.assertTrue(self.do_identify(hash))
                 self.do_verify('stub', hash)
                 result = self.do_genhash('stub', hash)
-                self.assertIsInstance(result, str,
-                    "genhash() failed to return native string: %r" % (result,))
+                self.check_returned_native_str(result, "genhash")
             else:
+                # otherwise it should reject them
                 self.assertFalse(self.do_identify(hash),
                     "identify() incorrectly identified empty hash")
                 self.assertRaises(ValueError, self.do_verify, 'stub', hash,
                     __msg__="verify() failed to reject empty hash")
                 self.assertRaises(ValueError, self.do_genhash, 'stub', hash,
                     __msg__="genhash() failed to reject empty hash")
+
+        #
+        # test identify doesn't throw decoding errors on 8-bit input
+        #
+        self.do_identify('\xe2\x82\xac\xc2\xa5$') # utf-8
+        self.do_identify('abc\x91\x00') # non-utf8
 
     #---------------------------------------------------------
     # fuzz testing
@@ -1477,7 +1603,7 @@ class HandlerCase(TestCase):
         from passlib.utils import tick
         handler = self.handler
         disabled = self.is_disabled_handler
-        max_time = int(os.environ.get("PASSLIB_TESTS_FUZZ_TIME") or 1)
+        max_time = float(os.environ.get("PASSLIB_TESTS_FUZZ_TIME") or 1)
         verifiers = self.get_fuzz_verifiers()
         def vname(v):
             return (v.__doc__ or v.__name__).splitlines()[0]
@@ -1614,9 +1740,140 @@ class HandlerCase(TestCase):
                 return rng.choice(handler.ident_values)
 
     #=========================================================
-    # test 8x - mixin tests
-    # test 9x - handler-specific tests
+    #       test 8x - mixin tests
+    #       test 9x - handler-specific tests
+    # eoc
     #=========================================================
+
+class OsCryptMixin(HandlerCase):
+    """helper used by create_backend_case() which adds additional features
+    to test the os_crypt backend.
+
+    * if crypt support is missing, inserts fake crypt support to simulate
+      a working safe_crypt, to test passlib's codepath as fully as possible.
+
+    * extra tests to verify non-conformant crypt implementations are handled
+      correctly.
+
+    * check that native crypt support is detected correctly for known platforms.
+    """
+    #=========================================================
+    # option flags
+    #=========================================================
+    # platforms that are known to support / not support this hash natively.
+    # encodeds as os.platform prefixes.
+    platform_crypt_support = dict()
+
+    # TODO: test that os_crypt support is detected correct on the expected
+    # platofrms.
+
+    #=========================================================
+    # instance attrs
+    #=========================================================
+    __unittest_skip = True
+
+    # force this backend
+    backend = "os_crypt"
+
+    # flag read by HandlerCase to detect if fake os crypt is enabled.
+    using_patched_crypt = False
+
+    #=========================================================
+    # setup
+    #=========================================================
+    def setUp(self):
+        assert self.backend == "os_crypt"
+        if not self.handler.has_backend("os_crypt"):
+            self.handler.get_backend() # hack to prevent recursion issue
+            self._patch_safe_crypt()
+        super(OsCryptMixin, self).setUp()
+
+    def _patch_safe_crypt(self):
+        """if crypt() doesn't support current hash alg, this patches
+        safe_crypt() so that it transparently uses another one of the handler's
+        backends, so that we can go ahead and test as much of code path
+        as possible.
+        """
+        handler = self.handler
+        alt_backend = _find_alternate_backend(handler, "os_crypt")
+        if not alt_backend:
+            raise AssertionError("handler has no available backends!")
+        import passlib.utils as mod
+        def crypt_stub(secret, hash):
+            with temporary_backend(handler, alt_backend):
+                hash = handler.genhash(secret, hash)
+            assert isinstance(hash, str)
+            return hash
+        self.addCleanup(setattr, mod, "_crypt", mod._crypt)
+        mod._crypt = crypt_stub
+        self.using_patched_crypt = True
+
+    #=========================================================
+    # custom tests
+    #=========================================================
+    def _use_mock_crypt(self):
+        "patch safe_crypt() so it returns mock value"
+        import passlib.utils as mod
+        if not self.using_patched_crypt:
+            self.addCleanup(setattr, mod, "_crypt", mod._crypt)
+        crypt_value = [None]
+        mod._crypt = lambda secret, config: crypt_value[0]
+        def setter(value):
+            crypt_value[0] = value
+        return setter
+
+    def test_80_faulty_crypt(self):
+        "test with faulty crypt()"
+        hash = self.get_sample_hash()[1]
+        exc_types = (AssertionError,)
+        setter = self._use_mock_crypt()
+
+        def test(value):
+            # set safe_crypt() to return specified value, and
+            # make sure assertion error is raised by handler.
+            setter(value)
+            self.assertRaises(exc_types, self.do_genhash, "stub", hash)
+            self.assertRaises(exc_types, self.do_encrypt, "stub")
+            self.assertRaises(exc_types, self.do_verify, "stub", hash)
+
+        test('$x' + hash[2:]) # detect wrong prefix
+        test(hash[:-1]) # detect too short
+        test(hash + 'x') # detect too long
+
+    def test_81_crypt_fallback(self):
+        "test per-call crypt() fallback"
+        # set safe_crypt to return None
+        setter = self._use_mock_crypt()
+        setter(None)
+        if _find_alternate_backend(self.handler, "os_crypt"):
+            # handler should have a fallback to use
+            h1 = self.do_encrypt("stub")
+            h2 = self.do_genhash("stub", h1)
+            self.assertEqual(h2, h1)
+            self.assertTrue(self.do_verify("stub", h1))
+        else:
+            # handler should give up
+            from passlib.exc import MissingBackendError
+            hash = self.get_sample_hash()[1]
+            self.assertRaises(MissingBackendError, self.do_encrypt, 'stub')
+            self.assertRaises(MissingBackendError, self.do_genhash, 'stub', hash)
+            self.assertRaises(MissingBackendError, self.do_verify, 'stub', hash)
+
+    def test_82_crypt_support(self):
+        "test crypt support detection"
+        platform = sys.platform
+        for name, flag in self.platform_crypt_support.items():
+            if not platform.startswith(name):
+                continue
+            if flag != self.using_patched_crypt:
+                return
+            if flag:
+                self.fail("expected %r platform would have native support "
+                          "for %r" % (platform, self.handler.name))
+            else:
+                self.fail("expected %r platform would NOT have native support "
+                          "for %r" % (platform, self.handler.name))
+        raise self.skipTest("no data for %r platform" % platform)
 
     #=========================================================
     # eoc
@@ -1630,11 +1887,21 @@ class UserHandlerMixin(HandlerCase):
     calls. as well, passing in a pair of strings as the password
     will be interpreted as (secret,user)
     """
-    __unittest_skip = True
+    #=========================================================
+    # option flags
+    #=========================================================
     default_user = "user"
     requires_user = True
     user_case_insensitive = False
 
+    #=========================================================
+    # instance attrs
+    #=========================================================
+    __unittest_skip = True
+
+    #=========================================================
+    # custom tests
+    #=========================================================
     def test_80_user(self):
         "test user context keyword"
         handler = self.handler
@@ -1674,6 +1941,10 @@ class UserHandlerMixin(HandlerCase):
 
     # TODO: user size? kinda dicey, depends on algorithm.
 
+    #=========================================================
+    # override test helpers
+    #=========================================================
+
     def is_secret_8bit(self, secret):
         secret = self._insert_user({}, secret)
         return not is_ascii_safe(secret)
@@ -1702,12 +1973,21 @@ class UserHandlerMixin(HandlerCase):
         secret = self._insert_user(kwds, secret)
         return self.handler.genhash(secret, config, **kwds)
 
+    #=========================================================
+    # modify fuzz testing
+    #=========================================================
     fuzz_user_alphabet = u("asdQWE123")
+
     fuzz_settings = HandlerCase.fuzz_settings + ["user"]
+
     def get_fuzz_user(self):
         if not self.requires_user and rng.random() < .1:
             return None
         return getrandstr(rng, self.fuzz_user_alphabet, rng.randint(2,10))
+
+    #=========================================================
+    # eoc
+    #=========================================================
 
 #=========================================================
 #backend test helpers
@@ -1792,10 +2072,15 @@ def create_backend_case(base_class, backend, module=None):
     if not enable and ut_version < 2:
         return None
 
-    #create subclass of 'base' which uses correct backend
+    # pick bases
+    bases = (base_class,)
+    if backend == "os_crypt":
+        bases += (OsCryptMixin,)
+
+    # create subclass to test backend
     backend_class = type(
         "%s_%s" % (backend, handler.name),
-        (base_class,),
+        bases,
         dict(
             descriptionPrefix = "%s (%s backend)" % (handler.name, backend),
             backend = backend,

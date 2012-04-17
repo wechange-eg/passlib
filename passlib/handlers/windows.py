@@ -9,7 +9,7 @@ import logging; log = logging.getLogger(__name__)
 from warnings import warn
 #site
 #libs
-from passlib.utils import to_unicode, to_bytes
+from passlib.utils import to_unicode, right_pad_string
 from passlib.utils.compat import b, bytes, str_to_uascii, u, unicode, uascii_to_str
 from passlib.utils.md4 import md4
 import passlib.utils.handlers as uh
@@ -105,8 +105,7 @@ class lmhash(_HasEncodingContext, uh.StaticHandler):
             secret = secret.upper()
         else:
             raise TypeError("secret must be unicode or bytes")
-        if len(secret) < 14:
-            secret += b("\x00") * (14-len(secret))
+        secret = right_pad_string(secret, 14)
         return des_encrypt_block(secret[0:7], MAGIC) + \
                des_encrypt_block(secret[7:14], MAGIC)
 
@@ -188,13 +187,8 @@ bsd_nthash = uh.PrefixWrapper("bsd_nthash", nthash, prefix="$3$$", ident="$3$$",
 ##
 ##    @classmethod
 ##    def identify(cls, hash):
-##        if not hash:
-##            return False
-##        if isinstance(hash, bytes):
-##            hash = hash.decode("latin-1")
-##        if len(hash) != 65:
-##            return False
-##        return cls._hash_regex.match(hash) is not None
+##        hash = to_unicode(hash, "latin-1", "hash")
+##        return len(hash) == 65 and cls._hash_regex.match(hash) is not None
 ##
 ##    @classmethod
 ##    def genconfig(cls):
@@ -203,7 +197,7 @@ bsd_nthash = uh.PrefixWrapper("bsd_nthash", nthash, prefix="$3$$", ident="$3$$",
 ##    @classmethod
 ##    def genhash(cls, secret, config):
 ##        if config is not None and not cls.identify(config):
-##            raise ValueError("not a valid %s hash" % (cls.name,))
+##            raise uh.exc.InvalidHashError(cls)
 ##        return cls.encrypt(secret)
 ##
 ##    @classmethod
@@ -212,13 +206,10 @@ bsd_nthash = uh.PrefixWrapper("bsd_nthash", nthash, prefix="$3$$", ident="$3$$",
 ##
 ##    @classmethod
 ##    def verify(cls, secret, hash):
-##        if hash is None:
-##            raise TypeError("no hash specified")
-##        if isinstance(hash, bytes):
-##            hash = hash.decode("latin-1")
+##        hash = to_unicode(hash, "ascii", "hash")
 ##        m = cls._hash_regex.match(hash)
 ##        if not m:
-##            raise ValueError("not a valid %s hash" % (cls.name,))
+##            raise uh.exc.InvalidHashError(cls)
 ##        lm, nt = m.group("lm", "nt")
 ##        # NOTE: verify against both in case encoding issue
 ##        # causes one not to match.

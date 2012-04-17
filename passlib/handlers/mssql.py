@@ -43,7 +43,7 @@ from warnings import warn
 #site
 #libs
 #pkg
-from passlib.utils import to_unicode, consteq
+from passlib.utils import consteq
 from passlib.utils.compat import b, bytes, bascii_to_str, unicode, u
 import passlib.utils.handlers as uh
 #local
@@ -66,30 +66,27 @@ UIDENT = u("0x0100")
 
 def _ident_mssql(hash, csize, bsize):
     "common identify for mssql 2000/2005"
-    if not hash:
-        return False
     if isinstance(hash, unicode):
         if len(hash) == csize and hash.startswith(UIDENT):
             return True
-    else:
-        assert isinstance(hash, bytes)
+    elif isinstance(hash, bytes):
         if len(hash) == csize and hash.startswith(BIDENT):
             return True
         ##elif len(hash) == bsize and hash.startswith(BIDENT2): # raw bytes
         ##    return True
+    else:
+        raise uh.exc.ExpectedStringError(hash, "hash")
     return False
 
-def _parse_mssql(hash, csize, bsize, name):
+def _parse_mssql(hash, csize, bsize, handler):
     "common parser for mssql 2000/2005; returns 4 byte salt + checksum"
-    if not hash:
-        raise ValueError("no hash specified")
     if isinstance(hash, unicode):
         if len(hash) == csize and hash.startswith(UIDENT):
             try:
                 return unhexlify(hash[6:].encode("utf-8"))
             except TypeError: # throw when bad char found
                 pass
-    else:
+    elif isinstance(hash, bytes):
         # assumes ascii-compat encoding
         assert isinstance(hash, bytes)
         if len(hash) == csize and hash.startswith(BIDENT):
@@ -99,7 +96,9 @@ def _parse_mssql(hash, csize, bsize, name):
                 pass
         ##elif len(hash) == bsize and hash.startswith(BIDENT2): # raw bytes
         ##    return hash[2:]
-    raise ValueError("invalid %s hash" % name)
+    else:
+        raise uh.exc.ExpectedStringError(hash, "hash")
+    raise uh.exc.InvalidHashError(handler)
 
 class mssql2000(uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
     """This class implements the password hash used by MS-SQL 2000, and follows the :ref:`password-hash-api`.
@@ -140,7 +139,7 @@ class mssql2000(uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
 
     @classmethod
     def from_string(cls, hash):
-        data = _parse_mssql(hash, 94, 46, cls.name)
+        data = _parse_mssql(hash, 94, 46, cls)
         return cls(salt=data[:4], checksum=data[4:])
 
     def to_string(self):
@@ -149,7 +148,8 @@ class mssql2000(uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
         return "0x0100" + bascii_to_str(hexlify(raw).upper())
 
     def _calc_checksum(self, secret):
-        secret = to_unicode(secret, 'utf-8', errname='secret')
+        if isinstance(secret, bytes):
+            secret = secret.decode("utf-8")
         salt = self.salt
         return _raw_mssql(secret, salt) + _raw_mssql(secret.upper(), salt)
 
@@ -157,11 +157,13 @@ class mssql2000(uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
     def verify(cls, secret, hash):
         # NOTE: we only compare against the upper-case hash
         # XXX: add 'full' just to verify both checksums?
+        uh.validate_secret(secret)
         self = cls.from_string(hash)
         chk = self.checksum
         if chk is None:
-            raise uh.MissingDigestError(cls)
-        secret = to_unicode(secret, 'utf-8', errname='secret')
+            raise uh.exc.MissingDigestError(cls)
+        if isinstance(secret, bytes):
+            secret = secret.decode("utf-8")
         result = _raw_mssql(secret.upper(), self.salt)
         return consteq(result, chk[20:])
 
@@ -207,7 +209,7 @@ class mssql2005(uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
 
     @classmethod
     def from_string(cls, hash):
-        data = _parse_mssql(hash, 54, 26, cls.name)
+        data = _parse_mssql(hash, 54, 26, cls)
         return cls(salt=data[:4], checksum=data[4:])
 
     def to_string(self):
@@ -216,7 +218,8 @@ class mssql2005(uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
         return "0x0100" + bascii_to_str(hexlify(raw)).upper()
 
     def _calc_checksum(self, secret):
-        secret = to_unicode(secret, 'utf-8', errname='secret')
+        if isinstance(secret, bytes):
+            secret = secret.decode("utf-8")
         return _raw_mssql(secret, self.salt)
 
     #=========================================================

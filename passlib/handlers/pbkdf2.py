@@ -10,7 +10,7 @@ import logging; log = logging.getLogger(__name__)
 from warnings import warn
 #site
 #libs
-from passlib.utils import ab64_decode, ab64_encode
+from passlib.utils import ab64_decode, ab64_encode, to_unicode
 from passlib.utils.compat import b, bytes, str_to_bascii, u, uascii_to_str, unicode
 from passlib.utils.pbkdf2 import pbkdf2
 import passlib.utils.handlers as uh
@@ -65,28 +65,19 @@ class Pbkdf2DigestHandler(uh.HasRounds, uh.HasRawSalt, uh.HasRawChecksum, uh.Gen
 
     @classmethod
     def from_string(cls, hash):
-        if not hash:
-            raise ValueError("no hash specified")
-        rounds, salt, chk = uh.parse_mc3(hash, cls.ident, cls.name)
-        int_rounds = int(rounds)
-        if rounds != unicode(int_rounds): #forbid zero padding, etc.
-            raise ValueError("invalid %s hash" % (cls.name,))
-        raw_salt = ab64_decode(salt.encode("ascii"))
-        raw_chk = ab64_decode(chk.encode("ascii")) if chk else None
-        return cls(
-            rounds=int_rounds,
-            salt=raw_salt,
-            checksum=raw_chk,
-        )
+        rounds, salt, chk = uh.parse_mc3(hash, cls.ident, handler=cls)
+        salt = ab64_decode(salt.encode("ascii"))
+        if chk:
+            chk = ab64_decode(chk.encode("ascii"))
+        return cls(rounds=rounds, salt=salt, checksum=chk)
 
     def to_string(self, withchk=True):
         salt = ab64_encode(self.salt).decode("ascii")
         if withchk and self.checksum:
             chk = ab64_encode(self.checksum).decode("ascii")
-            hash = u('%s%d$%s$%s') % (self.ident, self.rounds, salt, chk)
         else:
-            hash = u('%s%d$%s') % (self.ident, self.rounds, salt)
-        return uascii_to_str(hash)
+            chk = None
+        return uh.render_mc3(self.ident, self.rounds, salt, chk)
 
     def _calc_checksum(self, secret):
         if isinstance(secret, unicode):
@@ -201,30 +192,20 @@ class cta_pbkdf2_sha1(uh.HasRounds, uh.HasRawSalt, uh.HasRawChecksum, uh.Generic
 
     @classmethod
     def from_string(cls, hash):
-        if not hash:
-            raise ValueError("no hash specified")
-        rounds, salt, chk = uh.parse_mc3(hash, cls.ident, cls.name)
-        if rounds.startswith("0"):
-            #passlib deviation: forbidding
-            #left-padded with zeroes
-            raise ValueError("invalid cta_pbkdf2_sha1 hash")
-        rounds = int(rounds, 16)
+        # NOTE: passlib deviation - forbidding zero-padded rounds
+        rounds, salt, chk = uh.parse_mc3(hash, cls.ident, rounds_base=16, handler=cls)
         salt = b64decode(salt.encode("ascii"), CTA_ALTCHARS)
         if chk:
             chk = b64decode(chk.encode("ascii"), CTA_ALTCHARS)
-        return cls(
-            rounds=rounds,
-            salt=salt,
-            checksum=chk,
-        )
+        return cls(rounds=rounds, salt=salt, checksum=chk)
 
     def to_string(self, withchk=True):
-        hash = u('$p5k2$%x$%s') % (self.rounds,
-                                b64encode(self.salt, CTA_ALTCHARS).decode("ascii"))
+        salt = b64encode(self.salt, CTA_ALTCHARS).decode("ascii")
         if withchk and self.checksum:
-            hash = u("%s$%s") % (hash,
-                              b64encode(self.checksum, CTA_ALTCHARS).decode("ascii"))
-        return uascii_to_str(hash)
+            chk = b64encode(self.checksum, CTA_ALTCHARS).decode("ascii")
+        else:
+            chk = None
+        return uh.render_mc3(self.ident, self.rounds, salt, chk, rounds_base=16)
 
     #=========================================================
     #backend
@@ -298,26 +279,17 @@ class dlitz_pbkdf2_sha1(uh.HasRounds, uh.HasSalt, uh.GenericHandler):
 
     @classmethod
     def from_string(cls, hash):
-        if not hash:
-            raise ValueError("no hash specified")
-        rounds, salt, chk = uh.parse_mc3(hash, cls.ident, cls.name)
-        if rounds.startswith("0"): #zero not allowed, nor left-padded with zeroes
-            raise ValueError("invalid dlitz_pbkdf2_sha1 hash")
-        rounds = int(rounds, 16) if rounds else 400
-        return cls(
-            rounds=rounds,
-            salt=salt,
-            checksum=chk,
-        )
+        rounds, salt, chk = uh.parse_mc3(hash, cls.ident, rounds_base=16,
+                                         default_rounds=400, handler=cls)
+        return cls(rounds=rounds, salt=salt, checksum=chk)
 
     def to_string(self, withchk=True):
-        if self.rounds == 400:
-            hash = u('$p5k2$$%s') % (self.salt,)
-        else:
-            hash = u('$p5k2$%x$%s') % (self.rounds, self.salt)
-        if withchk and self.checksum:
-            hash = u("%s$%s") % (hash,self.checksum)
-        return uascii_to_str(hash)
+        rounds = self.rounds
+        if rounds == 400:
+            rounds = None # omit rounds measurement if == 400
+        return uh.render_mc3(self.ident, rounds, self.salt,
+                             checksum=self.checksum if withchk else None,
+                             rounds_base=16)
 
     #=========================================================
     #backend
@@ -361,13 +333,10 @@ class atlassian_pbkdf2_sha1(uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler)
 
     @classmethod
     def from_string(cls, hash):
-        if not hash:
-            raise ValueError("no hash specified")
-        if isinstance(hash, bytes):
-            hash = hash.decode("ascii")
+        hash = to_unicode(hash, "ascii", "hash")
         ident = cls.ident
         if not hash.startswith(ident):
-            raise ValueError("invalid %s hash" % (cls.name,))
+            raise uh.exc.InvalidHashError(cls)
         data = b64decode(hash[len(ident):].encode("ascii"))
         salt, chk = data[:16], data[16:]
         return cls(salt=salt, checksum=chk)
@@ -427,28 +396,20 @@ class grub_pbkdf2_sha512(uh.HasRounds, uh.HasRawSalt, uh.HasRawChecksum, uh.Gene
 
     @classmethod
     def from_string(cls, hash):
-        if not hash:
-            raise ValueError("no hash specified")
-        rounds, salt, chk = uh.parse_mc3(hash, cls.ident, cls.name, sep=u("."))
-        int_rounds = int(rounds)
-        if rounds != str(int_rounds): #forbid zero padding, etc.
-            raise ValueError("invalid %s hash" % (cls.name,))
-        raw_salt = unhexlify(salt.encode("ascii"))
-        raw_chk = unhexlify(chk.encode("ascii")) if chk else None
-        return cls(
-            rounds=int_rounds,
-            salt=raw_salt,
-            checksum=raw_chk,
-        )
+        rounds, salt, chk = uh.parse_mc3(hash, cls.ident, sep=u("."),
+                                         handler=cls)
+        salt = unhexlify(salt.encode("ascii"))
+        if chk:
+            chk = unhexlify(chk.encode("ascii"))
+        return cls(rounds=rounds, salt=salt, checksum=chk)
 
     def to_string(self, withchk=True):
         salt = hexlify(self.salt).decode("ascii").upper()
         if withchk and self.checksum:
             chk = hexlify(self.checksum).decode("ascii").upper()
-            hash = u('%s%d.%s.%s') % (self.ident, self.rounds, salt, chk)
         else:
-            hash = u('%s%d.%s') % (self.ident, self.rounds, salt)
-        return uascii_to_str(hash)
+            chk = None
+        return uh.render_mc3(self.ident, self.rounds, salt, chk, sep=u("."))
 
     def _calc_checksum(self, secret):
         #TODO: find out what grub's policy is re: unicode

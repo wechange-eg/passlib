@@ -210,32 +210,29 @@ class scram(uh.HasRounds, uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
 
     @classmethod
     def from_string(cls, hash):
-        # parse hash
-        if not hash:
-            raise ValueError("no hash specified")
-        hash = to_native_str(hash, "ascii", errname="hash")
+        hash = to_native_str(hash, "ascii", "hash")
         if not hash.startswith("$scram$"):
-            raise ValueError("invalid scram hash")
+            raise uh.exc.InvalidHashError(cls)
         parts = hash[7:].split("$")
         if len(parts) != 3:
-            raise ValueError("invalid scram hash")
+            raise uh.exc.MalformedHashError(cls)
         rounds_str, salt_str, chk_str = parts
 
         # decode rounds
         rounds = int(rounds_str)
         if rounds_str != str(rounds): #forbid zero padding, etc.
-            raise ValueError("invalid scram hash")
+            raise uh.exc.MalformedHashError(cls)
 
         # decode salt
         try:
             salt = ab64_decode(salt_str.encode("ascii"))
         except TypeError:
-            raise ValueError("malformed scram hash")
+            raise uh.exc.MalformedHashError(cls)
 
         # decode algs/digest list
         if not chk_str:
             # scram hashes MUST have something here.
-            raise ValueError("invalid scram hash")
+            raise uh.exc.MalformedHashError(cls)
         elif "=" in chk_str:
             # comma-separated list of 'alg=digest' pairs
             algs = None
@@ -245,7 +242,7 @@ class scram(uh.HasRounds, uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
                 try:
                     chkmap[alg] = ab64_decode(digest.encode("ascii"))
                 except TypeError:
-                    raise ValueError("malformed scram hash")
+                    raise uh.exc.MalformedHashError(cls)
         else:
             # comma-separated list of alg names, no digests
             algs = chk_str
@@ -289,7 +286,7 @@ class scram(uh.HasRounds, uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
                 raise ValueError("SCRAM limits algorithm names to "
                                  "9 characters: %r" % (alg,))
             if not isinstance(digest, bytes):
-                raise TypeError("digests must be raw bytes")
+                raise uh.exc.ExpectedTypeError(digest, "raw bytes", "digests")
             # TODO: verify digest size (if digest is known)
         if 'sha-1' not in checksum:
             # NOTE: required because of SCRAM spec.
@@ -352,6 +349,7 @@ class scram(uh.HasRounds, uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
 
     @classmethod
     def verify(cls, secret, hash, full=False):
+        uh.validate_secret(secret)
         self = cls.from_string(hash)
         chkmap = self.checksum
         if not chkmap:
@@ -377,9 +375,8 @@ class scram(uh.HasRounds, uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
                 else:
                     failed = True
             if correct and failed:
-                warning("scram hash verified inconsistently, may be corrupted",
-                        PasslibHashWarning)
-                return False
+                raise ValueError("scram hash verified inconsistently, "
+                                 "may be corrupted")
             else:
                 return correct
         else:
@@ -388,7 +385,8 @@ class scram(uh.HasRounds, uh.HasRawSalt, uh.HasRawChecksum, uh.GenericHandler):
                 if alg in chkmap:
                     other = self._calc_checksum(secret, alg)
                     return consteq(other, chkmap[alg])
-            # there should *always* be at least sha-1.
+            # there should always be sha-1 at the very least,
+            # or something went wrong inside _norm_algs()
             raise AssertionError("sha-1 digest not found!")
 
     #=========================================================

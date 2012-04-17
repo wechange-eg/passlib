@@ -14,7 +14,7 @@ from passlib.hash import ldap_md5, sha256_crypt
 from passlib.registry import _unload_handler_name as unload_handler_name, \
     register_crypt_handler, get_crypt_handler
 from passlib.exc import MissingBackendError, PasslibHashWarning
-from passlib.utils import getrandstr, JYTHON, rng, to_unicode
+from passlib.utils import getrandstr, JYTHON, rng
 from passlib.utils.compat import b, bytes, bascii_to_str, str_to_uascii, \
                                  uascii_to_str, unicode, PY_MAX_25
 import passlib.utils.handlers as uh
@@ -74,7 +74,8 @@ class SkeletonTest(TestCase):
         self.assertFalse(d1.identify(u('a')))
         self.assertFalse(d1.identify(u('b')))
         self.assertFalse(d1.identify(u('c')))
-        self.assertFalse(d1.identify(None))
+        self.assertRaises(TypeError, d1.identify, None)
+        self.assertRaises(TypeError, d1.identify, 1)
 
         # check default genconfig method
         self.assertIs(d1.genconfig(), None)
@@ -109,23 +110,24 @@ class SkeletonTest(TestCase):
                     raise ValueError
 
         # check fallback
-        self.assertFalse(d1.identify(None))
+        self.assertRaises(TypeError, d1.identify, None)
+        self.assertRaises(TypeError, d1.identify, 1)
         self.assertFalse(d1.identify(''))
         self.assertTrue(d1.identify('a'))
         self.assertFalse(d1.identify('b'))
 
         # check regexp
         d1._hash_regex = re.compile(u('@.'))
-        self.assertFalse(d1.identify(None))
-        self.assertFalse(d1.identify(''))
+        self.assertRaises(TypeError, d1.identify, None)
+        self.assertRaises(TypeError, d1.identify, 1)
         self.assertTrue(d1.identify('@a'))
         self.assertFalse(d1.identify('a'))
         del d1._hash_regex
 
         # check ident-based
         d1.ident = u('!')
-        self.assertFalse(d1.identify(None))
-        self.assertFalse(d1.identify(''))
+        self.assertRaises(TypeError, d1.identify, None)
+        self.assertRaises(TypeError, d1.identify, 1)
         self.assertTrue(d1.identify('!a'))
         self.assertFalse(d1.identify('a'))
         del d1.ident
@@ -372,7 +374,8 @@ class SkeletonTest(TestCase):
         self.assertFalse(d1.identify(u("!Cxxx")))
         self.assertFalse(d1.identify(u("A")))
         self.assertFalse(d1.identify(u("")))
-        self.assertFalse(d1.identify(None))
+        self.assertRaises(TypeError, d1.identify, None)
+        self.assertRaises(TypeError, d1.identify, 1)
 
         # check default_ident missing is detected.
         d1.default_ident = None
@@ -548,7 +551,7 @@ class SaltedHash(uh.HasSalt, uh.GenericHandler):
     @classmethod
     def from_string(cls, hash):
         if not cls.identify(hash):
-            raise ValueError("not a salted-example hash")
+            raise uh.exc.InvalidHashError(cls)
         if isinstance(hash, bytes):
             hash = hash.decode("ascii")
         return cls(salt=hash[5:-40], checksum=hash[-40:])
