@@ -4,6 +4,8 @@
 The Passlib Python Library
 ==========================
 
+Imported from https://foss.heptapod.net/python-libs/passlib for Django 4 adjustments.
+
 Welcome
 =======
 Passlib is a password hashing library for Python 3, which provides
